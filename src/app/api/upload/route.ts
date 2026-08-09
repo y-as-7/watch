@@ -6,7 +6,7 @@ import { PutObjectCommand } from '@aws-sdk/client-s3';
 
 export const maxDuration = 300; // 5 minute max execution for uploads on serverless
 
-const bucketName = process.env.R2_BUCKET_NAME || 'movies';
+const bucketName = process.env.R2_BUCKET_NAME || 'stream';
 const publicDomain = process.env.R2_PUBLIC_DOMAIN || 'https://pub-dde59808cc1047d79e1e16a58f627c57.r2.dev';
 
 export async function POST(request: Request) {

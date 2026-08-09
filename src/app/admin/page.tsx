@@ -98,7 +98,7 @@ export default function AdminPage() {
     }
   };
 
-  // Upload video to Cloudflare R2 (handles files up to 2GB+)
+  // Upload video to Cloudflare R2 (handles large files up to 2GB+)
   const handleUploadMovie = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!uploadFile) return;
@@ -106,10 +106,10 @@ export default function AdminPage() {
     setIsUploading(true);
     setUploadProgress(5);
     const fileSizeMB = (uploadFile.size / (1024 * 1024)).toFixed(1);
-    setUploadMessage(`Preparing upload for ${uploadFile.name} (${fileSizeMB} MB)...`);
+    setUploadMessage(`Generating presigned Cloudflare R2 upload URL for ${uploadFile.name} (${fileSizeMB} MB)...`);
 
     try {
-      // Step 1: Get presigned S3 upload URL from Cloudflare R2
+      // Step 1: Request presigned upload URL from server API
       const initRes = await fetch('/api/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -119,11 +119,19 @@ export default function AdminPage() {
         }),
       });
 
-      const initData = await initRes.json();
-      if (!initRes.ok) throw new Error(initData.error || 'Presigned URL generation failed');
+      let initData;
+      const responseText = await initRes.text();
+      try {
+        initData = JSON.parse(responseText);
+      } catch {
+        throw new Error(responseText || 'Server returned invalid response');
+      }
+
+      if (!initRes.ok) {
+        throw new Error(initData.error || 'Presigned URL generation failed');
+      }
 
       setUploadProgress(15);
-      setUploadMessage(`Uploading ${fileSizeMB} MB to Cloudflare R2 storage...`);
 
       // Step 2: Upload large file directly to R2 using XMLHttpRequest with progress bar
       await new Promise<void>((resolve, reject) => {
