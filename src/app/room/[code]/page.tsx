@@ -50,15 +50,21 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
 
   // Real-time Socket.io & HTTP Sync engine with Automatic Reconnection Recovery
   const httpSyncWorkingRef = useRef(false);
+  const guestRef = useRef(guest);
+  guestRef.current = guest;
+
+  const guestId = guest?.id;
 
   useEffect(() => {
-    if (!guest || !code) return;
+    if (!guestId || !code) return;
 
     const socket = getSocket();
 
     const handleConnect = () => {
       setConnectionStatus('connected');
-      socket.emit('join-room', { roomId: code, user: guest });
+      if (guestRef.current) {
+        socket.emit('join-room', { roomId: code, user: guestRef.current });
+      }
     };
 
     const handleDisconnect = () => {
@@ -70,7 +76,9 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
 
     const handleReconnect = () => {
       setConnectionStatus('connected');
-      socket.emit('join-room', { roomId: code, user: guest });
+      if (guestRef.current) {
+        socket.emit('join-room', { roomId: code, user: guestRef.current });
+      }
       performSyncFetch();
     };
 
@@ -124,17 +132,23 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     // Server state synchronization fetcher
     const performSyncFetch = async () => {
       try {
-        const res = await fetch(`/api/rooms/sync?code=${code}&userId=${guest.id}`);
+        const res = await fetch(`/api/rooms/sync?code=${code}&userId=${guestId}`);
         const data = await res.json();
 
         if (data.success) {
           httpSyncWorkingRef.current = true;
           setConnectionStatus('connected');
           if (data.videoUrl && data.videoUrl !== videoUrl) setVideoUrl(data.videoUrl);
-          if (data.videoTitle) setVideoTitle(data.videoTitle);
-          setIsPlaying(data.isPlaying);
-          setCurrentTime(data.currentTime);
-          setConnectedUsers(data.users || []);
+          if (data.videoTitle && data.videoTitle !== videoTitle) setVideoTitle(data.videoTitle);
+          
+          setIsPlaying((prev) => (prev !== data.isPlaying ? data.isPlaying : prev));
+
+          // Only update currentTime if desynced by more than 3 seconds to avoid video stuttering
+          if (typeof data.currentTime === 'number') {
+            setCurrentTime((prev) => (Math.abs(prev - data.currentTime) > 3 ? data.currentTime : prev));
+          }
+
+          if (data.users) setConnectedUsers(data.users);
           if (data.chats) setChatMessages(data.chats);
           if (data.reactions) setFloatingReactions(data.reactions);
         } else {
@@ -151,8 +165,8 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     // Immediate initial sync
     performSyncFetch();
 
-    // Fast 1.2s sync heartbeat polling for serverless multi-client sync
-    syncIntervalRef.current = setInterval(performSyncFetch, 1200);
+    // Smooth 2.5s sync heartbeat polling for serverless multi-client sync
+    syncIntervalRef.current = setInterval(performSyncFetch, 2500);
 
     return () => {
       if (syncIntervalRef.current) clearInterval(syncIntervalRef.current);
@@ -167,7 +181,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
       socket.off('chat-message', handleChatMessage);
       socket.off('chat-history', handleChatHistory);
     };
-  }, [code, guest]);
+  }, [code, guestId]);
 
   // Action handlers
   const handleSendSyncAction = async (action: string, payload: Record<string, unknown> = {}) => {

@@ -101,6 +101,23 @@ export default function SyncedPlayer({
     };
   }, [roomId]);
 
+  // Listen for iOS WebKit native video fullscreen state changes
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const handleBeginFS = () => setIsFullscreen(true);
+    const handleEndFS = () => setIsFullscreen(false);
+
+    video.addEventListener('webkitbeginfullscreen', handleBeginFS);
+    video.addEventListener('webkitendfullscreen', handleEndFS);
+
+    return () => {
+      video.removeEventListener('webkitbeginfullscreen', handleBeginFS);
+      video.removeEventListener('webkitendfullscreen', handleEndFS);
+    };
+  }, []);
+
   // Sync Video Element state with room prop updates
   useEffect(() => {
     const video = videoRef.current;
@@ -115,12 +132,12 @@ export default function SyncedPlayer({
       setLocalIsPlaying(false);
     }
 
-    // 2. Instant Seek Force Snap & 0.5s Drift auto-correction
+    // 2. Smooth Seek Snap & Drift auto-correction (3s threshold to prevent buffer lag)
     if (typeof currentTime === 'number' && Number.isFinite(currentTime)) {
       const drift = Math.abs(video.currentTime - currentTime);
-      const isExplicitSeek = Math.abs(lastSyncedTimeRef.current - currentTime) > 2;
+      const isExplicitSeek = Math.abs(lastSyncedTimeRef.current - currentTime) > 3;
 
-      if (isExplicitSeek || drift > 0.5) {
+      if (isExplicitSeek || drift > 3) {
         setSyncStatus('syncing');
         video.currentTime = currentTime;
         setProgress(currentTime);
@@ -198,13 +215,44 @@ export default function SyncedPlayer({
   };
 
   const handleToggleFullscreen = () => {
-    if (!containerRef.current) return;
-    if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen().catch(() => {});
-      setIsFullscreen(true);
-    } else {
-      document.exitFullscreen().catch(() => {});
+    const video = videoRef.current;
+    const container = containerRef.current;
+
+    const isDocFullscreen = Boolean(
+      document.fullscreenElement ||
+        (document as any).webkitFullscreenElement ||
+        (document as any).mozFullScreenElement
+    );
+
+    if (isDocFullscreen) {
+      if (document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {});
+      } else if ((document as any).webkitExitFullscreen) {
+        (document as any).webkitExitFullscreen();
+      }
       setIsFullscreen(false);
+      return;
+    }
+
+    // iOS Safari Native Video WebKit Fullscreen Support
+    if (video && typeof (video as any).webkitEnterFullscreen === 'function') {
+      try {
+        (video as any).webkitEnterFullscreen();
+        setIsFullscreen(true);
+        return;
+      } catch {
+        // quiet catch
+      }
+    }
+
+    // Standard HTML5 Fullscreen API (Desktop / Android / iPadOS)
+    if (container && container.requestFullscreen) {
+      container.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {
+        if (video && typeof (video as any).webkitEnterFullscreen === 'function') {
+          (video as any).webkitEnterFullscreen();
+          setIsFullscreen(true);
+        }
+      });
     }
   };
 
@@ -266,6 +314,8 @@ export default function SyncedPlayer({
           }
         }}
         playsInline
+        webkit-playsinline="true"
+        x5-playsinline="true"
       />
 
       {/* Floating Reaction Animations Overlay */}
