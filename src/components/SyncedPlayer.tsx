@@ -22,6 +22,16 @@ export interface ReactionItem {
   emoji: string;
 }
 
+// Deterministic pseudo-random horizontal lane for a reaction, derived from its
+// id so it stays fixed across re-renders instead of jumping sideways each time.
+function reactionLeftPercent(id: string): number {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = (hash * 31 + id.charCodeAt(i)) & 0xffffffff;
+  }
+  return 15 + (Math.abs(hash) % 1000) / 1000 * 70;
+}
+
 interface SyncedPlayerProps {
   videoUrl: string;
   videoTitle?: string;
@@ -340,7 +350,7 @@ function SyncedPlayer({
             key={r.id}
             className="absolute bottom-20 flex flex-col items-center animate-float-up"
             style={{
-              left: `${15 + Math.random() * 70}%`,
+              left: `${reactionLeftPercent(r.id)}%`,
             }}
           >
             <span className="text-4xl filter drop-shadow-lg mb-1">{r.emoji}</span>
