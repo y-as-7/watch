@@ -231,18 +231,86 @@ export default function AdminPage() {
       <div className="min-h-screen flex flex-col">
         <Navbar />
         <main className="flex-1 flex items-center justify-center p-4">
-          <div className="max-w-md w-full glass-card rounded-2xl p-8 border border-white/10 text-center space-y-4">
-            <ShieldCheck className="w-12 h-12 text-rose-500 mx-auto" />
-            <h2 className="text-xl font-bold text-slate-100">Admin Access Required</h2>
-            <p className="text-xs text-slate-400">
-              You must sign in as an admin (email: <code className="text-purple-300">admin@admin.com</code>, password: <code className="text-purple-300">password</code>) to access the room creation portal.
-            </p>
-            <Link
-              href="/"
-              className="inline-block bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs px-5 py-2.5 rounded-xl shadow-lg"
+          <div className="max-w-md w-full glass-card rounded-2xl p-8 border border-white/10 shadow-2xl relative space-y-6">
+            <div className="flex items-center space-x-3">
+              <div className="p-2.5 rounded-xl bg-purple-600/30 border border-purple-500/40 text-purple-300">
+                <ShieldCheck className="w-6 h-6" />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold text-slate-100">Admin Login</h2>
+                <p className="text-xs text-slate-400">Sign in to manage rooms & video assets</p>
+              </div>
+            </div>
+
+            {statusError && (
+              <div className="flex items-center space-x-2 p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-rose-300 text-xs">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                <span>{statusError}</span>
+              </div>
+            )}
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setStatusError('');
+                const form = e.target as HTMLFormElement;
+                const email = (form.elements.namedItem('email') as HTMLInputElement).value;
+                const password = (form.elements.namedItem('password') as HTMLInputElement).value;
+
+                try {
+                  const res = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email: email.trim(), password }),
+                  });
+                  const data = await res.json();
+                  if (!res.ok) {
+                    setStatusError(data.error || 'Invalid credentials');
+                  } else {
+                    setIsAdmin(true);
+                    setAdminEmail(data.email);
+                    loadMoviesList();
+                    loadRoomsList();
+                  }
+                } catch {
+                  setStatusError('Authentication failed');
+                }
+              }}
+              className="space-y-4"
             >
-              Return to Home Page
-            </Link>
+              <div>
+                <label className="block text-xs font-semibold text-slate-400 mb-1.5 uppercase">
+                  Admin Email
+                </label>
+                <input
+                  name="email"
+                  type="email"
+                  placeholder="Enter admin email"
+                  className="w-full bg-slate-900/80 border border-slate-700/80 rounded-xl px-4 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-purple-500"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-400 mb-1.5 uppercase">
+                  Password
+                </label>
+                <input
+                  name="password"
+                  type="password"
+                  placeholder="Enter password"
+                  className="w-full bg-slate-900/80 border border-slate-700/80 rounded-xl px-4 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-purple-500"
+                  required
+                />
+              </div>
+
+              <button
+                type="submit"
+                className="w-full bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white font-bold text-xs py-3 rounded-xl shadow-lg transition-all"
+              >
+                Sign In as Admin
+              </button>
+            </form>
           </div>
         </main>
       </div>

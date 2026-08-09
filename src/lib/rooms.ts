@@ -10,17 +10,8 @@ const DEFAULT_VIDEO =
   process.env.NEXT_PUBLIC_DEFAULT_VIDEO ||
   'https://pub-dde59808cc1047d79e1e16a58f627c57.r2.dev/movies/[Qfilm.tv].Siccin.3.2016.WEB-DL.720p.mp4';
 
-// Global room cache across requests
+// Global room cache across requests (empty by default)
 const globalRooms = new Map<string, RoomInfo>();
-
-// Seed default initial room (e.g. 123456 & 888888)
-globalRooms.set('123456', {
-  code: '123456',
-  title: 'Siccin 3 (2016) Movie Room',
-  videoUrl: DEFAULT_VIDEO,
-  createdAt: new Date().toISOString(),
-  createdBy: 'admin@admin.com',
-});
 
 export function generateRoomCode(): string {
   let code = '';
@@ -47,7 +38,7 @@ export function getRoom(code: string): RoomInfo | null {
   if (globalRooms.has(code)) {
     return globalRooms.get(code)!;
   }
-  // Auto-generate temporary room for any 6-digit code if requested
+  // Auto-generate temporary room for any valid 6-digit code if requested
   if (/^\d{6}$/.test(code)) {
     const autoRoom: RoomInfo = {
       code,
