@@ -138,7 +138,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { code, action, user, currentTime, videoUrl, videoTitle, message, emoji } = body;
+    const { code, action, user, currentTime, isPlaying, videoUrl, videoTitle, message, emoji } = body;
 
     if (!code) {
       return NextResponse.json({ error: 'Room code required' }, { status: 400 });
@@ -209,6 +209,17 @@ export async function POST(request: Request) {
       dbState.lastUpdated = now;
 
       if (typeof currentTime === 'number') localRoom.currentTime = currentTime;
+      localRoom.lastUpdated = now;
+    } else if (action === 'progress') {
+      if (typeof currentTime === 'number') {
+        dbState.currentTime = currentTime;
+        localRoom.currentTime = currentTime;
+      }
+      if (typeof isPlaying === 'boolean') {
+        dbState.isPlaying = isPlaying;
+        localRoom.isPlaying = isPlaying;
+      }
+      dbState.lastUpdated = now;
       localRoom.lastUpdated = now;
     } else if (action === 'change-video') {
       if (videoUrl) {

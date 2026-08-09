@@ -50,6 +50,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
 
   // Real-time Socket.io & HTTP Sync engine with Automatic Reconnection Recovery
   const httpSyncWorkingRef = useRef(false);
+  const isInitialSyncRef = useRef(true);
   const guestRef = useRef(guest);
   guestRef.current = guest;
 
@@ -129,7 +130,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
       handleConnect();
     }
 
-    // Server state synchronization fetcher
+    // Server state synchronization fetcher (1-second heartbeat polling for MongoDB Atlas)
     const performSyncFetch = async () => {
       try {
         const res = await fetch(`/api/rooms/sync?code=${code}&userId=${guestId}`);
@@ -138,14 +139,22 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
         if (data.success) {
           httpSyncWorkingRef.current = true;
           setConnectionStatus('connected');
+
           if (data.videoUrl && data.videoUrl !== videoUrl) setVideoUrl(data.videoUrl);
           if (data.videoTitle && data.videoTitle !== videoTitle) setVideoTitle(data.videoTitle);
-          
-          setIsPlaying((prev) => (prev !== data.isPlaying ? data.isPlaying : prev));
 
-          // Only update currentTime if desynced by more than 3 seconds to avoid video stuttering
-          if (typeof data.currentTime === 'number') {
-            setCurrentTime((prev) => (Math.abs(prev - data.currentTime) > 3 ? data.currentTime : prev));
+          if (isInitialSyncRef.current) {
+            // New user joining: instantly snap to exact playback position & play/pause state from MongoDB Atlas
+            if (typeof data.currentTime === 'number') setCurrentTime(data.currentTime);
+            setIsPlaying(Boolean(data.isPlaying));
+            isInitialSyncRef.current = false;
+          } else {
+            // Periodic 1-second sync update
+            setIsPlaying((prev) => (prev !== data.isPlaying ? data.isPlaying : prev));
+
+            if (typeof data.currentTime === 'number') {
+              setCurrentTime((prev) => (Math.abs(prev - data.currentTime) > 3 ? data.currentTime : prev));
+            }
           }
 
           if (data.users) setConnectedUsers(data.users);
@@ -165,8 +174,8 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     // Immediate initial sync
     performSyncFetch();
 
-    // Smooth 2.5s sync heartbeat polling for serverless multi-client sync
-    syncIntervalRef.current = setInterval(performSyncFetch, 2500);
+    // 1-Second long-polling heartbeat for MongoDB Atlas real-time room sync
+    syncIntervalRef.current = setInterval(performSyncFetch, 1000);
 
     return () => {
       if (syncIntervalRef.current) clearInterval(syncIntervalRef.current);
@@ -183,7 +192,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     };
   }, [code, guestId]);
 
-  // Action handlers
+  // Action handlers with immediate MongoDB Atlas persistence
   const handleSendSyncAction = async (action: string, payload: Record<string, unknown> = {}) => {
     if (!guest) return;
     try {
@@ -212,18 +221,18 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
   const handlePlay = (time: number) => {
     setIsPlaying(true);
     setCurrentTime(time);
-    handleSendSyncAction('play', { currentTime: time });
+    handleSendSyncAction('play', { currentTime: time, isPlaying: true });
   };
 
   const handlePause = (time: number) => {
     setIsPlaying(false);
     setCurrentTime(time);
-    handleSendSyncAction('pause', { currentTime: time });
+    handleSendSyncAction('pause', { currentTime: time, isPlaying: false });
   };
 
   const handleSeek = (time: number) => {
     setCurrentTime(time);
-    handleSendSyncAction('seek', { currentTime: time });
+    handleSendSyncAction('seek', { currentTime: time, isPlaying });
   };
 
   const handleSendMessage = (text: string) => {
