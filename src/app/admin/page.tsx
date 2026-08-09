@@ -15,7 +15,6 @@ import {
   Play,
   Copy,
   Check,
-  LogOut,
   AlertCircle,
   Folder,
 } from 'lucide-react';
@@ -99,16 +98,18 @@ export default function AdminPage() {
     }
   };
 
-  // Upload video to Cloudflare R2 `movies` folder
+  // Upload video to Cloudflare R2 (handles files up to 2GB+)
   const handleUploadMovie = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!uploadFile) return;
 
     setIsUploading(true);
-    setUploadProgress(10);
-    setUploadMessage('Generating Cloudflare R2 presigned upload URL...');
+    setUploadProgress(5);
+    const fileSizeMB = (uploadFile.size / (1024 * 1024)).toFixed(1);
+    setUploadMessage(`Preparing upload for ${uploadFile.name} (${fileSizeMB} MB)...`);
 
     try {
+      // Step 1: Get presigned S3 upload URL from Cloudflare R2
       const initRes = await fetch('/api/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -119,29 +120,76 @@ export default function AdminPage() {
       });
 
       const initData = await initRes.json();
-      if (!initRes.ok) throw new Error(initData.error || 'Upload initialization failed');
+      if (!initRes.ok) throw new Error(initData.error || 'Presigned URL generation failed');
 
-      setUploadProgress(40);
-      setUploadMessage('Uploading video binary to Cloudflare R2 storage bucket...');
+      setUploadProgress(15);
+      setUploadMessage(`Uploading ${fileSizeMB} MB to Cloudflare R2 storage...`);
 
-      // Upload binary to presigned R2 S3 URL
-      const uploadRes = await fetch(initData.uploadUrl, {
-        method: 'PUT',
-        headers: { 'Content-Type': uploadFile.type || 'video/mp4' },
-        body: uploadFile,
+      // Step 2: Upload large file directly to R2 using XMLHttpRequest with progress bar
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', initData.uploadUrl, true);
+        xhr.setRequestHeader('Content-Type', uploadFile.type || 'video/mp4');
+
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) {
+            const percent = Math.round((event.loaded / event.total) * 90) + 10;
+            setUploadProgress(percent);
+            const loadedMB = (event.loaded / (1024 * 1024)).toFixed(1);
+            setUploadMessage(`Uploaded ${loadedMB} MB of ${fileSizeMB} MB (${percent}%)...`);
+          }
+        };
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve();
+          } else {
+            reject(new Error(`Direct R2 upload failed with status ${xhr.status}`));
+          }
+        };
+
+        xhr.onerror = () => {
+          reject(new Error('Network error uploading file to Cloudflare R2'));
+        };
+
+        xhr.send(uploadFile);
       });
 
-      if (!uploadRes.ok) throw new Error('Direct R2 video upload failed');
-
       setUploadProgress(100);
-      setUploadMessage('Upload completed successfully!');
-
+      setUploadMessage('Upload completed successfully! Movie added to Cloudflare R2.');
       setUploadFile(null);
       await loadMoviesList();
-      setSelectedMovieUrl(initData.publicUrl);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Upload failed';
-      setUploadMessage(`Error: ${msg}`);
+      if (initData.publicUrl) {
+        setSelectedMovieUrl(initData.publicUrl);
+      }
+    } catch (primaryError: unknown) {
+      // Fallback: If browser CORS blocks direct presigned upload, upload via server stream
+      console.warn('Direct upload failed, attempting server proxy upload fallback:', primaryError);
+      setUploadMessage(`Direct R2 upload blocked by browser, trying server proxy upload...`);
+
+      try {
+        const formData = new FormData();
+        formData.append('file', uploadFile);
+
+        const res = await fetch('/api/upload', {
+          method: 'POST',
+          body: formData,
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Server proxy upload failed');
+
+        setUploadProgress(100);
+        setUploadMessage('Upload completed successfully via Server Proxy!');
+        setUploadFile(null);
+        await loadMoviesList();
+        if (data.publicUrl) {
+          setSelectedMovieUrl(data.publicUrl);
+        }
+      } catch (fallbackError: unknown) {
+        const msg = fallbackError instanceof Error ? fallbackError.message : 'Upload failed';
+        setUploadMessage(`Error: ${msg}`);
+      }
     } finally {
       setIsUploading(false);
     }
@@ -380,7 +428,7 @@ export default function AdminPage() {
                   type="text"
                   value={roomTitle}
                   onChange={(e) => setRoomTitle(e.target.value)}
-                  placeholder="e.g. Siccin 3 Movie Night"
+                  placeholder="e.g. Siccin 4 Movie Night"
                   className="w-full bg-slate-900/80 border border-slate-700/80 rounded-xl px-4 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-purple-500"
                   required
                 />
@@ -433,15 +481,15 @@ export default function AdminPage() {
             </form>
           </div>
 
-          {/* Column 2: Cloudflare R2 Movie Uploader & File Manager */}
+          {/* Column 2: Cloudflare R2 Movie Uploader (2GB+ Large Files Supported) */}
           <div className="glass-card rounded-2xl p-6 border border-white/10 space-y-6">
             <div className="flex items-center space-x-3">
               <div className="p-2.5 rounded-xl bg-cyan-600/30 border border-cyan-500/40 text-cyan-300">
                 <Upload className="w-5 h-5" />
               </div>
               <div>
-                <h2 className="text-lg font-bold text-slate-100">Cloudflare R2 Uploader</h2>
-                <p className="text-xs text-slate-400">Upload video files directly to the <code className="text-cyan-300 font-mono">movies</code> folder</p>
+                <h2 className="text-lg font-bold text-slate-100">Cloudflare R2 Uploader (2GB+ Supported)</h2>
+                <p className="text-xs text-slate-400">Upload large movie files directly to the <code className="text-cyan-300 font-mono">movies</code> folder</p>
               </div>
             </div>
 
@@ -459,23 +507,29 @@ export default function AdminPage() {
                   htmlFor="r2-file-input"
                   className="cursor-pointer text-xs font-semibold text-purple-400 hover:text-purple-300 block"
                 >
-                  {uploadFile ? uploadFile.name : 'Click to select video file from computer'}
+                  {uploadFile ? `${uploadFile.name} (${(uploadFile.size / (1024 * 1024)).toFixed(1)} MB)` : 'Click to select large video file (up to 2GB+)'}
                 </label>
                 <p className="text-[10px] text-slate-500 mt-1">Supports MP4, MKV, WebM video files</p>
               </div>
 
               {uploadMessage && (
-                <div className="text-xs text-cyan-300 p-2.5 rounded-xl bg-cyan-950/60 border border-cyan-500/30">
+                <div className="text-xs text-cyan-300 p-2.5 rounded-xl bg-cyan-950/60 border border-cyan-500/30 break-words">
                   {uploadMessage}
                 </div>
               )}
 
               {isUploading && (
-                <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
-                  <div
-                    className="bg-gradient-to-r from-purple-500 to-cyan-400 h-full transition-all duration-300"
-                    style={{ width: `${uploadProgress}%` }}
-                  />
+                <div className="space-y-1">
+                  <div className="flex justify-between text-[11px] text-slate-400 font-mono">
+                    <span>Uploading...</span>
+                    <span>{uploadProgress}%</span>
+                  </div>
+                  <div className="w-full bg-slate-800 rounded-full h-2.5 overflow-hidden">
+                    <div
+                      className="bg-gradient-to-r from-purple-500 via-pink-500 to-cyan-400 h-full transition-all duration-200"
+                      style={{ width: `${uploadProgress}%` }}
+                    />
+                  </div>
                 </div>
               )}
 
