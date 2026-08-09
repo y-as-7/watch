@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef } from 'react';
 
 interface OtpPinInputProps {
   length?: number;
@@ -22,7 +22,6 @@ export default function OtpPinInput({
   const handleChange = (index: number, e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value.replace(/\D/g, '');
     if (!val) {
-      // Clear current digit
       const nextDigits = [...digits];
       nextDigits[index] = '';
       const newStr = nextDigits.join('');
@@ -30,14 +29,12 @@ export default function OtpPinInput({
       return;
     }
 
-    // Single digit or pasted string
     const lastChar = val[val.length - 1];
     const nextDigits = [...digits];
     nextDigits[index] = lastChar;
     const newStr = nextDigits.join('');
     onChange(newStr);
 
-    // Auto-focus next input
     if (index < length - 1) {
       inputsRef.current[index + 1]?.focus();
     }
@@ -68,7 +65,7 @@ export default function OtpPinInput({
   };
 
   return (
-    <div className="flex items-center justify-center space-x-2 sm:space-x-3 my-4">
+    <div className="flex items-center justify-center space-x-1.5 sm:space-x-3 my-4">
       {Array.from({ length }).map((_, i) => (
         <input
           key={i}
@@ -83,7 +80,7 @@ export default function OtpPinInput({
           onChange={(e) => handleChange(i, e)}
           onKeyDown={(e) => handleKeyDown(i, e)}
           onPaste={handlePaste}
-          className={`w-11 h-14 sm:w-14 sm:h-16 text-center text-xl sm:text-2xl font-mono font-extrabold rounded-2xl border transition-all duration-200 focus:outline-none ${
+          className={`w-10 h-12 sm:w-14 sm:h-16 text-center text-lg sm:text-2xl font-mono font-extrabold rounded-xl sm:rounded-2xl border transition-all duration-200 focus:outline-none ${
             digits[i]
               ? 'bg-purple-950/80 border-purple-500 text-purple-200 shadow-lg shadow-purple-900/40 scale-105'
               : 'bg-slate-900/90 border-slate-700/80 text-white focus:border-purple-400 focus:ring-2 focus:ring-purple-500/50'

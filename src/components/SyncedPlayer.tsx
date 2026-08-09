@@ -359,9 +359,9 @@ export default function SyncedPlayer({
             </button>
 
             {/* Volume */}
-            <div className="flex items-center space-x-2 group/vol">
-              <button onClick={handleToggleMute} className="p-2 text-slate-300 hover:text-white transition-colors">
-                {isMuted || volume === 0 ? <VolumeX className="w-5 h-5 text-rose-400" /> : <Volume2 className="w-5 h-5" />}
+            <div className="flex items-center space-x-1.5 group/vol">
+              <button onClick={handleToggleMute} className="p-1.5 sm:p-2 text-slate-300 hover:text-white transition-colors">
+                {isMuted || volume === 0 ? <VolumeX className="w-4 h-4 sm:w-5 sm:h-5 text-rose-400" /> : <Volume2 className="w-4 h-4 sm:w-5 sm:h-5" />}
               </button>
               <input
                 type="range"
@@ -370,7 +370,7 @@ export default function SyncedPlayer({
                 step={0.05}
                 value={isMuted ? 0 : volume}
                 onChange={handleVolumeChange}
-                className="w-16 h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-400"
+                className="hidden sm:block w-16 h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-400"
               />
             </div>
           </div>

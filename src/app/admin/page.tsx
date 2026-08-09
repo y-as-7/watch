@@ -17,6 +17,7 @@ import {
   Check,
   AlertCircle,
   Folder,
+  HelpCircle,
 } from 'lucide-react';
 import Navbar from '@/components/Navbar';
 import AdminSettingsModal from '@/components/AdminSettingsModal';
@@ -47,6 +48,7 @@ export default function AdminPage() {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadMessage, setUploadMessage] = useState('');
+  const [showCorsGuide, setShowCorsGuide] = useState(false);
 
   // Active rooms & settings modal
   const [rooms, setRooms] = useState<RoomItem[]>([]);
@@ -98,7 +100,7 @@ export default function AdminPage() {
     }
   };
 
-  // Upload video to Cloudflare R2 (handles large files up to 2GB+)
+  // Upload video to Cloudflare R2 (handles files up to 2GB+)
   const handleUploadMovie = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!uploadFile) return;
@@ -119,29 +121,38 @@ export default function AdminPage() {
         }),
       });
 
-      let initData;
       const responseText = await initRes.text();
+      let initData: { uploadUrl?: string; publicUrl?: string; error?: string } = {};
+
       try {
         initData = JSON.parse(responseText);
       } catch {
-        throw new Error(responseText || 'Server returned invalid response');
+        if (responseText.includes('Request Entity Too Large') || initRes.status === 413) {
+          throw new Error('File exceeds Next.js server payload limit. Please use rclone or enable CORS on R2 bucket "stream".');
+        }
+        throw new Error('Server returned invalid response. Check R2 credentials.');
       }
 
       if (!initRes.ok) {
         throw new Error(initData.error || 'Presigned URL generation failed');
       }
 
-      setUploadProgress(15);
+      if (!initData.uploadUrl) {
+        throw new Error('No presigned URL returned from server');
+      }
 
-      // Step 2: Upload large file directly to R2 using XMLHttpRequest with progress bar
+      setUploadProgress(15);
+      setUploadMessage(`Uploading ${fileSizeMB} MB directly to Cloudflare R2 storage...`);
+
+      // Step 2: Direct browser PUT upload to Cloudflare R2 presigned S3 URL
       await new Promise<void>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        xhr.open('PUT', initData.uploadUrl, true);
+        xhr.open('PUT', initData.uploadUrl!, true);
         xhr.setRequestHeader('Content-Type', uploadFile.type || 'video/mp4');
 
         xhr.upload.onprogress = (event) => {
           if (event.lengthComputable) {
-            const percent = Math.round((event.loaded / event.total) * 90) + 10;
+            const percent = Math.round((event.loaded / event.total) * 85) + 15;
             setUploadProgress(percent);
             const loadedMB = (event.loaded / (1024 * 1024)).toFixed(1);
             setUploadMessage(`Uploaded ${loadedMB} MB of ${fileSizeMB} MB (${percent}%)...`);
@@ -152,12 +163,12 @@ export default function AdminPage() {
           if (xhr.status >= 200 && xhr.status < 300) {
             resolve();
           } else {
-            reject(new Error(`Direct R2 upload failed with status ${xhr.status}`));
+            reject(new Error(`R2 upload status ${xhr.status}. Make sure CORS is allowed on R2 bucket "stream".`));
           }
         };
 
         xhr.onerror = () => {
-          reject(new Error('Network error uploading file to Cloudflare R2'));
+          reject(new Error('Browser blocked upload due to Cloudflare R2 CORS. Click "CORS Guide" below or use rclone command.'));
         };
 
         xhr.send(uploadFile);
@@ -170,33 +181,11 @@ export default function AdminPage() {
       if (initData.publicUrl) {
         setSelectedMovieUrl(initData.publicUrl);
       }
-    } catch (primaryError: unknown) {
-      // Fallback: If browser CORS blocks direct presigned upload, upload via server stream
-      console.warn('Direct upload failed, attempting server proxy upload fallback:', primaryError);
-      setUploadMessage(`Direct R2 upload blocked by browser, trying server proxy upload...`);
-
-      try {
-        const formData = new FormData();
-        formData.append('file', uploadFile);
-
-        const res = await fetch('/api/upload', {
-          method: 'POST',
-          body: formData,
-        });
-
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Server proxy upload failed');
-
-        setUploadProgress(100);
-        setUploadMessage('Upload completed successfully via Server Proxy!');
-        setUploadFile(null);
-        await loadMoviesList();
-        if (data.publicUrl) {
-          setSelectedMovieUrl(data.publicUrl);
-        }
-      } catch (fallbackError: unknown) {
-        const msg = fallbackError instanceof Error ? fallbackError.message : 'Upload failed';
-        setUploadMessage(`Error: ${msg}`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Upload failed';
+      setUploadMessage(`Error: ${msg}`);
+      if (msg.includes('CORS') || msg.includes('blocked')) {
+        setShowCorsGuide(true);
       }
     } finally {
       setIsUploading(false);
@@ -489,17 +478,47 @@ export default function AdminPage() {
             </form>
           </div>
 
-          {/* Column 2: Cloudflare R2 Movie Uploader (2GB+ Large Files Supported) */}
+          {/* Column 2: Cloudflare R2 Movie Uploader */}
           <div className="glass-card rounded-2xl p-6 border border-white/10 space-y-6">
-            <div className="flex items-center space-x-3">
-              <div className="p-2.5 rounded-xl bg-cyan-600/30 border border-cyan-500/40 text-cyan-300">
-                <Upload className="w-5 h-5" />
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-3">
+                <div className="p-2.5 rounded-xl bg-cyan-600/30 border border-cyan-500/40 text-cyan-300">
+                  <Upload className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-bold text-slate-100">Cloudflare R2 Uploader</h2>
+                  <p className="text-xs text-slate-400">Upload large movies to bucket <code className="text-cyan-300 font-mono">stream</code></p>
+                </div>
               </div>
-              <div>
-                <h2 className="text-lg font-bold text-slate-100">Cloudflare R2 Uploader (2GB+ Supported)</h2>
-                <p className="text-xs text-slate-400">Upload large movie files directly to the <code className="text-cyan-300 font-mono">movies</code> folder</p>
-              </div>
+
+              <button
+                onClick={() => setShowCorsGuide(!showCorsGuide)}
+                className="flex items-center space-x-1 text-xs text-cyan-400 hover:text-cyan-300 p-1"
+                title="R2 CORS Guide"
+              >
+                <HelpCircle className="w-4 h-4" />
+                <span>CORS Help</span>
+              </button>
             </div>
+
+            {/* Quick rclone command helper box */}
+            <div className="p-3 rounded-xl bg-slate-900/90 border border-purple-500/30 text-xs text-slate-300 space-y-1">
+              <span className="font-bold text-purple-300 block">⚡ Fast CLI Upload (Recommended for 800MB–2GB+):</span>
+              <code className="block p-2 rounded-lg bg-black/60 font-mono text-[11px] text-cyan-300 overflow-x-auto select-all">
+                rclone copy &quot;[Qfilm.tv].Siccin.4.2017.WEB-DL.720p.mp4&quot; r2:stream/movies/ -P
+              </code>
+            </div>
+
+            {showCorsGuide && (
+              <div className="p-4 rounded-xl bg-purple-950/80 border border-purple-500/40 text-xs text-purple-200 space-y-2">
+                <h4 className="font-bold text-purple-300">How to enable Browser Uploads in Cloudflare R2:</h4>
+                <ol className="list-decimal list-inside space-y-1 text-[11px]">
+                  <li>Open Cloudflare Dashboard ➔ R2 ➔ Bucket <code className="font-mono text-cyan-300">stream</code></li>
+                  <li>Click <strong>Settings</strong> ➔ Scroll to <strong>CORS Policy</strong></li>
+                  <li>Add Allowed Origins: <code className="font-mono text-cyan-300">*</code> and Allowed Methods: <code className="font-mono text-cyan-300">PUT, GET, HEAD</code></li>
+                </ol>
+              </div>
+            )}
 
             <form onSubmit={handleUploadMovie} className="space-y-4">
               <div className="border-2 border-dashed border-slate-700 hover:border-purple-500 rounded-2xl p-6 text-center transition-colors">
@@ -515,7 +534,7 @@ export default function AdminPage() {
                   htmlFor="r2-file-input"
                   className="cursor-pointer text-xs font-semibold text-purple-400 hover:text-purple-300 block"
                 >
-                  {uploadFile ? `${uploadFile.name} (${(uploadFile.size / (1024 * 1024)).toFixed(1)} MB)` : 'Click to select large video file (up to 2GB+)'}
+                  {uploadFile ? `${uploadFile.name} (${(uploadFile.size / (1024 * 1024)).toFixed(1)} MB)` : 'Click to select movie file'}
                 </label>
                 <p className="text-[10px] text-slate-500 mt-1">Supports MP4, MKV, WebM video files</p>
               </div>
