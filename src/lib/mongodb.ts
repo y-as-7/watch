@@ -60,11 +60,29 @@ if (MONGODB_URI) {
   }
 }
 
+let indexPromise: Promise<void> | null = null;
+
 export async function getDatabase(): Promise<Db | null> {
   if (!clientPromise) return null;
   try {
     const client = await clientPromise;
-    return client.db('watch_party');
+    const db = client.db('watch_party');
+
+    if (!indexPromise) {
+      indexPromise = (async () => {
+        try {
+          await Promise.all([
+            db.collection('room_states').createIndex({ roomId: 1 }, { unique: true }),
+            db.collection('chat_messages').createIndex({ roomId: 1, createdAt: -1 }),
+            db.collection('room_metadata').createIndex({ code: 1 }, { unique: true }),
+          ]);
+        } catch {
+          // ignore duplicate index warnings
+        }
+      })();
+    }
+
+    return db;
   } catch (err) {
     console.warn('[MongoDB] Failed to connect to database:', err);
     return null;

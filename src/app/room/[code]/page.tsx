@@ -158,7 +158,18 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
           }
 
           if (data.users) setConnectedUsers(data.users);
-          if (data.chats) setChatMessages(data.chats);
+          if (Array.isArray(data.chats)) {
+            setChatMessages((prev) => {
+              const map = new Map<string, ChatMessage>();
+              data.chats.forEach((c: ChatMessage) => map.set(c.id, c));
+              prev.forEach((c) => {
+                if (!map.has(c.id)) map.set(c.id, c);
+              });
+              return Array.from(map.values()).sort(
+                (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+              );
+            });
+          }
           if (data.reactions) setFloatingReactions(data.reactions);
         } else {
           httpSyncWorkingRef.current = false;
