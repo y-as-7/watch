@@ -5,6 +5,7 @@ import {
   saveChatMessageDB,
   getChatHistoryDB,
 } from '@/lib/mongodb';
+import { triggerRoomEvent } from '@/lib/pusherServer';
 
 interface UserSession {
   id: string;
@@ -23,7 +24,7 @@ interface ChatMsg {
 
 interface Reaction {
   id: string;
-  user: UserSession;
+  user: { id: string; name: string; avatar: string };
   emoji: string;
   timestamp: number;
 }
@@ -75,9 +76,8 @@ export async function GET(request: Request) {
 
   const now = Date.now();
 
-  // Try MongoDB Atlas first
-  const dbState = await getRoomStateDB(code);
-  const dbChats = await getChatHistoryDB(code);
+  // Try MongoDB Atlas first (parallel reads to avoid doubling round-trip latency)
+  const [dbState, dbChats] = await Promise.all([getRoomStateDB(code), getChatHistoryDB(code)]);
 
   let videoUrl = DEFAULT_VIDEO;
   let videoTitle = 'Siccin 3 (2016) WEB-DL 720p';
@@ -98,9 +98,10 @@ export async function GET(request: Request) {
       id: u.id,
       name: u.name,
       avatar: u.avatar,
-      lastSeen: now,
+      lastSeen: 0,
     }));
     chatsList = (dbChats as unknown as ChatMsg[]) || [];
+    reactionsList = (dbState.reactions || []).filter((r) => now - r.timestamp < 4000);
   } else {
     // Fallback to local memory map
     const localRoom = getOrCreateSyncRoomLocal(code);
@@ -188,6 +189,9 @@ export async function POST(request: Request) {
       });
     }
 
+    let pusherEvent: string | null = null;
+    let pusherPayload: Record<string, unknown> = {};
+
     if (action === 'play') {
       dbState.isPlaying = true;
       if (typeof currentTime === 'number') dbState.currentTime = currentTime;
@@ -196,6 +200,9 @@ export async function POST(request: Request) {
       localRoom.isPlaying = true;
       if (typeof currentTime === 'number') localRoom.currentTime = currentTime;
       localRoom.lastUpdated = now;
+
+      pusherEvent = 'sync-play';
+      pusherPayload = { currentTime: dbState.currentTime };
     } else if (action === 'pause') {
       dbState.isPlaying = false;
       if (typeof currentTime === 'number') dbState.currentTime = currentTime;
@@ -204,12 +211,18 @@ export async function POST(request: Request) {
       localRoom.isPlaying = false;
       if (typeof currentTime === 'number') localRoom.currentTime = currentTime;
       localRoom.lastUpdated = now;
+
+      pusherEvent = 'sync-pause';
+      pusherPayload = { currentTime: dbState.currentTime };
     } else if (action === 'seek') {
       if (typeof currentTime === 'number') dbState.currentTime = currentTime;
       dbState.lastUpdated = now;
 
       if (typeof currentTime === 'number') localRoom.currentTime = currentTime;
       localRoom.lastUpdated = now;
+
+      pusherEvent = 'sync-seek';
+      pusherPayload = { currentTime: dbState.currentTime };
     } else if (action === 'progress') {
       if (typeof currentTime === 'number') {
         dbState.currentTime = currentTime;
@@ -237,6 +250,9 @@ export async function POST(request: Request) {
       localRoom.currentTime = 0;
       localRoom.isPlaying = false;
       localRoom.lastUpdated = now;
+
+      pusherEvent = 'sync-video-change';
+      pusherPayload = { videoUrl: dbState.videoUrl, videoTitle: dbState.videoTitle };
     } else if (action === 'chat') {
       if (message && user) {
         const chatObj = {
@@ -260,20 +276,34 @@ export async function POST(request: Request) {
           text: chatObj.text,
           timestamp: chatObj.timestamp,
         });
+
+        pusherEvent = 'chat-message';
+        pusherPayload = chatObj;
       }
     } else if (action === 'reaction') {
       if (emoji && user) {
-        localRoom.reactions.push({
+        const reactionObj = {
           id: 'react-' + now + '-' + Math.random().toString(36).substring(2, 6),
-          user,
+          user: { id: user.id, name: user.name || 'Guest', avatar: user.avatar || '🍿' },
           emoji,
           timestamp: now,
-        });
+        };
+        dbState.reactions = [...(dbState.reactions || []), reactionObj].filter(
+          (r) => now - r.timestamp < 4000
+        );
+        localRoom.reactions.push(reactionObj);
+
+        pusherEvent = 'reaction';
+        pusherPayload = reactionObj;
       }
     }
 
     dbState.users = users;
     await saveRoomStateDB(code, dbState);
+
+    if (pusherEvent) {
+      await triggerRoomEvent(code, pusherEvent, pusherPayload);
+    }
 
     return NextResponse.json({
       success: true,

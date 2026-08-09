@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, memo } from 'react';
 import {
   Play,
   Pause,
@@ -35,7 +35,7 @@ interface SyncedPlayerProps {
   onSeek: (time: number) => void;
 }
 
-export default function SyncedPlayer({
+function SyncedPlayer({
   videoUrl,
   videoTitle = 'Cloudflare R2 Stream',
   roomId,
@@ -64,6 +64,7 @@ export default function SyncedPlayer({
 
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const lastSyncedTimeRef = useRef<number>(0);
+  const lastProgressUpdateRef = useRef<number>(0);
 
   // Restore saved seek position from localStorage if room load starts
   useEffect(() => {
@@ -132,20 +133,30 @@ export default function SyncedPlayer({
       setLocalIsPlaying(false);
     }
 
-    // 2. Smooth Seek Snap & Drift auto-correction (3s threshold to prevent buffer lag)
+    // 2. Drift auto-correction: hard seek only for large drift/explicit seeks
+    // (rebuffers, so reserved for >3s); small drift is nudged back gently via
+    // playbackRate so it doesn't cause a visible freeze.
     if (typeof currentTime === 'number' && Number.isFinite(currentTime)) {
-      const drift = Math.abs(video.currentTime - currentTime);
+      const drift = video.currentTime - currentTime;
+      const absDrift = Math.abs(drift);
       const isExplicitSeek = Math.abs(lastSyncedTimeRef.current - currentTime) > 3;
 
-      if (isExplicitSeek || drift > 3) {
+      if (isExplicitSeek || absDrift > 3) {
         setSyncStatus('syncing');
         video.currentTime = currentTime;
+        video.playbackRate = playbackRate;
         setProgress(currentTime);
-        lastSyncedTimeRef.current = currentTime;
         setTimeout(() => setSyncStatus('synced'), 400);
+      } else if (absDrift > 0.75) {
+        setSyncStatus('syncing');
+        video.playbackRate = drift > 0 ? Math.max(0.8, playbackRate - 0.15) : playbackRate + 0.15;
+      } else {
+        video.playbackRate = playbackRate;
+        setSyncStatus('synced');
       }
+      lastSyncedTimeRef.current = currentTime;
     }
-  }, [isPlaying, currentTime, isUserDraggingSeek]);
+  }, [isPlaying, currentTime, isUserDraggingSeek, playbackRate]);
 
   const handleTogglePlay = () => {
     const video = videoRef.current;
@@ -293,6 +304,10 @@ export default function SyncedPlayer({
         onClick={handleTogglePlay}
         onTimeUpdate={() => {
           if (videoRef.current && !isUserDraggingSeek) {
+            const nowMs = performance.now();
+            if (nowMs - lastProgressUpdateRef.current < 250) return;
+            lastProgressUpdateRef.current = nowMs;
+
             const curTime = videoRef.current.currentTime;
             setProgress(curTime);
             if (Math.floor(curTime) % 5 === 0) {
@@ -492,3 +507,5 @@ export default function SyncedPlayer({
     </div>
   );
 }
+
+export default memo(SyncedPlayer);

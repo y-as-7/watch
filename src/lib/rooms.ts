@@ -44,10 +44,19 @@ export async function createRoomAsync(title: string, videoUrl: string, createdBy
   return room;
 }
 
-export function getRoom(code: string): RoomInfo | null {
+export async function getRoomAsync(code: string): Promise<RoomInfo | null> {
   if (globalRooms.has(code)) {
     return globalRooms.get(code)!;
   }
+
+  // Check MongoDB Atlas before falling back to a fabricated room, so a cold
+  // serverless instance doesn't overwrite real room metadata with the default video.
+  const dbRoom = await getRoomMetadataDB(code);
+  if (dbRoom) {
+    globalRooms.set(code, dbRoom);
+    return dbRoom;
+  }
+
   // Auto-generate temporary room for any valid 6-digit code if requested
   if (/^\d{6}$/.test(code)) {
     const autoRoom: RoomInfo = {
@@ -60,18 +69,6 @@ export function getRoom(code: string): RoomInfo | null {
     globalRooms.set(code, autoRoom);
     saveRoomMetadataDB(autoRoom).catch(() => {});
     return autoRoom;
-  }
-  return null;
-}
-
-export async function getRoomAsync(code: string): Promise<RoomInfo | null> {
-  const local = getRoom(code);
-  if (local) return local;
-
-  const dbRoom = await getRoomMetadataDB(code);
-  if (dbRoom) {
-    globalRooms.set(code, dbRoom);
-    return dbRoom;
   }
   return null;
 }

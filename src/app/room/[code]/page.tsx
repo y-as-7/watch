@@ -9,7 +9,7 @@ import UserListBar from '@/components/UserListBar';
 import RoomChat, { ChatMessage } from '@/components/RoomChat';
 import ShareRoomModal from '@/components/ShareRoomModal';
 import { getOrCreateGuestSession, GuestUser } from '@/lib/session';
-import { getSocket } from '@/lib/socketClient';
+import { subscribeToRoom, unsubscribeFromRoom, getPusherClient } from '@/lib/pusherClient';
 
 export default function RoomPage({ params }: { params: Promise<{ code: string }> }) {
   const { code } = use(params);
@@ -48,7 +48,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
       .catch(() => {});
   }, [code]);
 
-  // Real-time Socket.io & HTTP Sync engine with Automatic Reconnection Recovery
+  // Real-time Pusher Channels & HTTP polling fallback
   const httpSyncWorkingRef = useRef(false);
   const isInitialSyncRef = useRef(true);
   const guestRef = useRef(guest);
@@ -56,34 +56,30 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
 
   const guestId = guest?.id;
 
+  // Add a floating reaction and auto-remove it once its float-up animation ends,
+  // regardless of whether it arrived via Pusher or a poll (dedup by id either way).
+  const addReaction = (r: ReactionItem) => {
+    setFloatingReactions((prev) => (prev.some((x) => x.id === r.id) ? prev : [...prev, r]));
+    setTimeout(() => {
+      setFloatingReactions((prev) => prev.filter((x) => x.id !== r.id));
+    }, 4200);
+  };
+
   useEffect(() => {
     if (!guestId || !code) return;
 
-    const socket = getSocket();
+    const channel = subscribeToRoom(code);
+    const pusherClient = getPusherClient();
 
-    const handleConnect = () => {
-      setConnectionStatus('connected');
-      if (guestRef.current) {
-        socket.emit('join-room', { roomId: code, user: guestRef.current });
-      }
-    };
-
-    const handleDisconnect = () => {
-      // Only set reconnecting if HTTP sync polling is NOT succeeding
-      if (!httpSyncWorkingRef.current) {
+    const handlePusherStateChange = (states: { current: string }) => {
+      if (states.current === 'connected') {
+        setConnectionStatus('connected');
+      } else if (!httpSyncWorkingRef.current) {
         setConnectionStatus('reconnecting');
       }
     };
 
-    const handleReconnect = () => {
-      setConnectionStatus('connected');
-      if (guestRef.current) {
-        socket.emit('join-room', { roomId: code, user: guestRef.current });
-      }
-      performSyncFetch();
-    };
-
-    // Socket event handlers
+    // Pusher event handlers (near-instant sync while connected)
     const handleSyncPlay = ({ currentTime: time }: { currentTime: number }) => {
       setIsPlaying(true);
       if (typeof time === 'number') setCurrentTime(time);
@@ -106,31 +102,24 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     };
 
     const handleChatMessage = (msg: ChatMessage) => {
-      setChatMessages((prev) => [...prev.filter((m) => m.id !== msg.id), msg]);
+      setChatMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
     };
 
-    const handleChatHistory = (history: ChatMessage[]) => {
-      if (Array.isArray(history) && history.length > 0) {
-        setChatMessages(history);
-      }
-    };
+    const handleReaction = (r: ReactionItem) => addReaction(r);
 
-    socket.on('connect', handleConnect);
-    socket.on('disconnect', handleDisconnect);
-    socket.on('connect_error', handleDisconnect);
-    socket.on('reconnect', handleReconnect);
-    socket.on('sync-play', handleSyncPlay);
-    socket.on('sync-pause', handleSyncPause);
-    socket.on('sync-seek', handleSyncSeek);
-    socket.on('sync-video-change', handleSyncVideoChange);
-    socket.on('chat-message', handleChatMessage);
-    socket.on('chat-history', handleChatHistory);
+    pusherClient?.connection.bind('state_change', handlePusherStateChange);
 
-    if (socket.connected) {
-      handleConnect();
+    if (channel) {
+      channel.bind('sync-play', handleSyncPlay);
+      channel.bind('sync-pause', handleSyncPause);
+      channel.bind('sync-seek', handleSyncSeek);
+      channel.bind('sync-video-change', handleSyncVideoChange);
+      channel.bind('chat-message', handleChatMessage);
+      channel.bind('reaction', handleReaction);
     }
 
-    // Server state synchronization fetcher (1-second heartbeat polling for MongoDB Atlas)
+    // Server state synchronization fetcher: the resilient fallback that always
+    // runs, so sync keeps working even when Pusher can't connect.
     const performSyncFetch = async () => {
       try {
         const res = await fetch(`/api/rooms/sync?code=${code}&userId=${guestId}`);
@@ -149,15 +138,21 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
             setIsPlaying(Boolean(data.isPlaying));
             isInitialSyncRef.current = false;
           } else {
-            // Periodic 1-second sync update
+            // Periodic sync update: always pass the authoritative time through so
+            // SyncedPlayer can smooth out small drift instead of only reacting to jumps >3s.
             setIsPlaying((prev) => (prev !== data.isPlaying ? data.isPlaying : prev));
-
-            if (typeof data.currentTime === 'number') {
-              setCurrentTime((prev) => (Math.abs(prev - data.currentTime) > 3 ? data.currentTime : prev));
-            }
+            if (typeof data.currentTime === 'number') setCurrentTime(data.currentTime);
           }
 
-          if (data.users) setConnectedUsers(data.users);
+          if (data.users) {
+            setConnectedUsers((prev) => {
+              const next = data.users as GuestUser[];
+              const unchanged =
+                next.length === prev.length &&
+                next.every((u, i) => u.id === prev[i]?.id && u.name === prev[i]?.name && u.avatar === prev[i]?.avatar);
+              return unchanged ? prev : next;
+            });
+          }
           if (Array.isArray(data.chats)) {
             setChatMessages((prev) => {
               const map = new Map<string, ChatMessage>();
@@ -165,18 +160,23 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
               prev.forEach((c) => {
                 if (!map.has(c.id)) map.set(c.id, c);
               });
-              return Array.from(map.values()).sort(
+              const merged = Array.from(map.values()).sort(
                 (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
               );
+              const unchanged =
+                merged.length === prev.length && merged.every((m, i) => m.id === prev[i]?.id);
+              return unchanged ? prev : merged;
             });
           }
-          if (data.reactions) setFloatingReactions(data.reactions);
+          if (Array.isArray(data.reactions)) {
+            data.reactions.forEach((r: ReactionItem) => addReaction(r));
+          }
         } else {
           httpSyncWorkingRef.current = false;
         }
       } catch {
         httpSyncWorkingRef.current = false;
-        if (!socket.connected) {
+        if (pusherClient?.connection.state !== 'connected') {
           setConnectionStatus('reconnecting');
         }
       }
@@ -185,25 +185,21 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     // Immediate initial sync
     performSyncFetch();
 
-    // 1-Second long-polling heartbeat for MongoDB Atlas real-time room sync
+    // 1-Second long-polling heartbeat fallback for MongoDB Atlas room sync
     syncIntervalRef.current = setInterval(performSyncFetch, 1000);
 
     return () => {
       if (syncIntervalRef.current) clearInterval(syncIntervalRef.current);
-      socket.off('connect', handleConnect);
-      socket.off('disconnect', handleDisconnect);
-      socket.off('connect_error', handleDisconnect);
-      socket.off('reconnect', handleReconnect);
-      socket.off('sync-play', handleSyncPlay);
-      socket.off('sync-pause', handleSyncPause);
-      socket.off('sync-seek', handleSyncSeek);
-      socket.off('sync-video-change', handleSyncVideoChange);
-      socket.off('chat-message', handleChatMessage);
-      socket.off('chat-history', handleChatHistory);
+      pusherClient?.connection.unbind('state_change', handlePusherStateChange);
+      if (channel) {
+        channel.unbind_all();
+      }
+      unsubscribeFromRoom(code);
     };
   }, [code, guestId]);
 
-  // Action handlers with immediate MongoDB Atlas persistence
+  // Action handlers with immediate MongoDB Atlas persistence; the sync route
+  // triggers the Pusher broadcast server-side once the write succeeds.
   const handleSendSyncAction = async (action: string, payload: Record<string, unknown> = {}) => {
     if (!guest) return;
     try {
@@ -217,13 +213,6 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
           ...payload,
         }),
       });
-
-      const socket = getSocket();
-      if (socket.connected) {
-        if (action === 'play') socket.emit('sync-play', { roomId: code, currentTime: payload.currentTime });
-        if (action === 'pause') socket.emit('sync-pause', { roomId: code, currentTime: payload.currentTime });
-        if (action === 'seek') socket.emit('sync-seek', { roomId: code, currentTime: payload.currentTime });
-      }
     } catch {
       // quiet catch
     }

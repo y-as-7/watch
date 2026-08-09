@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { memo } from 'react';
 import { Users, Crown, Shield, Radio } from 'lucide-react';
 import { GuestUser } from '@/lib/session';
 
@@ -9,7 +9,7 @@ interface UserListBarProps {
   currentUserId?: string;
 }
 
-export default function UserListBar({ users = [], currentUserId }: UserListBarProps) {
+function UserListBar({ users = [], currentUserId }: UserListBarProps) {
   return (
     <div className="glass-card rounded-2xl p-4 border border-white/10 flex flex-col h-full">
       <div className="flex items-center justify-between pb-3 border-b border-white/10 mb-3">
@@ -73,3 +73,5 @@ export default function UserListBar({ users = [], currentUserId }: UserListBarPr
     </div>
   );
 }
+
+export default memo(UserListBar);

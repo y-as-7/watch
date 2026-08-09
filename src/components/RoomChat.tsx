@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, memo } from 'react';
 import { MessageSquare, Send, Heart, Flame, Laugh, Popcorn, Sparkles } from 'lucide-react';
 import { GuestUser } from '@/lib/session';
 
@@ -19,7 +19,7 @@ interface RoomChatProps {
 
 const REACTION_EMOJIS = ['❤️', '🔥', '😂', '🍿', '👑', '👏', '😮', '🎉'];
 
-export default function RoomChat({ messages = [], onSendMessage, onSendReaction }: RoomChatProps) {
+function RoomChat({ messages = [], onSendMessage, onSendReaction }: RoomChatProps) {
   const [textInput, setTextInput] = useState('');
 
   const handleSend = (e: React.FormEvent) => {
@@ -106,3 +106,5 @@ export default function RoomChat({ messages = [], onSendMessage, onSendReaction 
     </div>
   );
 }
+
+export default memo(RoomChat);

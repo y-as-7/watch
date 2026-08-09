@@ -16,6 +16,12 @@ export interface RoomStateData {
     isMuted?: boolean;
     socketId: string;
   }>;
+  reactions?: Array<{
+    id: string;
+    user: { id: string; name: string; avatar: string };
+    emoji: string;
+    timestamp: number;
+  }>;
 }
 
 export interface ChatMessageData {
@@ -48,16 +54,14 @@ declare global {
 let clientPromise: Promise<MongoClient> | null = null;
 
 if (MONGODB_URI) {
-  if (process.env.NODE_ENV === 'development') {
-    if (!global._mongoClientPromise) {
-      const client = new MongoClient(MONGODB_URI);
-      global._mongoClientPromise = client.connect();
-    }
-    clientPromise = global._mongoClientPromise;
-  } else {
+  // Cache the client on `global` in every environment so warm serverless
+  // instances reuse one connection instead of opening a fresh MongoClient
+  // (and TLS handshake) on every module instantiation.
+  if (!global._mongoClientPromise) {
     const client = new MongoClient(MONGODB_URI);
-    clientPromise = client.connect();
+    global._mongoClientPromise = client.connect();
   }
+  clientPromise = global._mongoClientPromise;
 }
 
 let indexPromise: Promise<void> | null = null;
@@ -126,6 +130,7 @@ export async function getRoomStateDB(roomId: string): Promise<RoomStateData | nu
       lastUpdated: doc.lastUpdated,
       hostId: doc.hostId,
       users: doc.users || [],
+      reactions: doc.reactions || [],
     };
   } catch (err) {
     console.warn(`[MongoDB] Error fetching room state for ${roomId}:`, err);
