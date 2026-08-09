@@ -2,13 +2,14 @@
 
 import React, { useState, useEffect, useRef, use } from 'react';
 import Link from 'next/link';
-import { Share2, Users, ArrowLeft, Radio, Film, ShieldCheck } from 'lucide-react';
+import { Share2, ArrowLeft } from 'lucide-react';
 import Navbar from '@/components/Navbar';
 import SyncedPlayer, { ReactionItem } from '@/components/SyncedPlayer';
 import UserListBar from '@/components/UserListBar';
 import RoomChat, { ChatMessage } from '@/components/RoomChat';
 import ShareRoomModal from '@/components/ShareRoomModal';
 import { getOrCreateGuestSession, GuestUser } from '@/lib/session';
+import { getSocket } from '@/lib/socketClient';
 
 export default function RoomPage({ params }: { params: Promise<{ code: string }> }) {
   const { code } = use(params);
@@ -25,6 +26,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [floatingReactions, setFloatingReactions] = useState<ReactionItem[]>([]);
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'reconnecting' | 'disconnected'>('connected');
 
   const syncIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -45,16 +47,44 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
       .catch(() => {});
   }, [code]);
 
-  // Real-time synchronization loop (Serverless + Sockets ready)
+  // Real-time Socket.io & HTTP Sync engine with Automatic Reconnection Recovery
   useEffect(() => {
     if (!guest || !code) return;
 
+    const socket = getSocket();
+
+    const handleConnect = () => {
+      setConnectionStatus('connected');
+      socket.emit('join-room', { roomId: code, user: guest });
+    };
+
+    const handleDisconnect = () => {
+      setConnectionStatus('reconnecting');
+    };
+
+    const handleReconnect = () => {
+      setConnectionStatus('connected');
+      socket.emit('join-room', { roomId: code, user: guest });
+      performSyncFetch();
+    };
+
+    socket.on('connect', handleConnect);
+    socket.on('disconnect', handleDisconnect);
+    socket.on('connect_error', handleDisconnect);
+    socket.on('reconnect', handleReconnect);
+
+    if (socket.connected) {
+      handleConnect();
+    }
+
+    // Server state synchronization fetcher
     const performSyncFetch = async () => {
       try {
         const res = await fetch(`/api/rooms/sync?code=${code}&userId=${guest.id}`);
         const data = await res.json();
 
         if (data.success) {
+          setConnectionStatus('connected');
           if (data.videoUrl && data.videoUrl !== videoUrl) setVideoUrl(data.videoUrl);
           if (data.videoTitle) setVideoTitle(data.videoTitle);
           setIsPlaying(data.isPlaying);
@@ -64,7 +94,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
           if (data.reactions) setFloatingReactions(data.reactions);
         }
       } catch {
-        // quiet fallback
+        setConnectionStatus('reconnecting');
       }
     };
 
@@ -76,6 +106,10 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
 
     return () => {
       if (syncIntervalRef.current) clearInterval(syncIntervalRef.current);
+      socket.off('connect', handleConnect);
+      socket.off('disconnect', handleDisconnect);
+      socket.off('connect_error', handleDisconnect);
+      socket.off('reconnect', handleReconnect);
     };
   }, [code, guest]);
 
@@ -93,6 +127,13 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
           ...payload,
         }),
       });
+
+      const socket = getSocket();
+      if (socket.connected) {
+        if (action === 'play') socket.emit('sync-play', { roomId: code, currentTime: payload.currentTime });
+        if (action === 'pause') socket.emit('sync-pause', { roomId: code, currentTime: payload.currentTime });
+        if (action === 'seek') socket.emit('sync-seek', { roomId: code, currentTime: payload.currentTime });
+      }
     } catch {
       // quiet catch
     }
@@ -173,6 +214,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
               isPlaying={isPlaying}
               currentTime={currentTime}
               reactions={floatingReactions}
+              connectionStatus={connectionStatus}
               onPlay={handlePlay}
               onPause={handlePause}
               onSeek={handleSeek}
@@ -181,7 +223,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
             <div className="glass-card rounded-2xl p-4 border border-white/10 flex items-center justify-between text-xs text-slate-400">
               <div className="flex items-center space-x-2">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                <span>Real-Time Playback & Seek Synchronized</span>
+                <span>Real-Time Instant Seek & State Synchronized</span>
               </div>
               <span>Cloudflare R2 Storage</span>
             </div>

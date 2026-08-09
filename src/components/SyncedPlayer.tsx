@@ -29,6 +29,7 @@ interface SyncedPlayerProps {
   isPlaying: boolean;
   currentTime: number;
   reactions?: ReactionItem[];
+  connectionStatus?: 'connected' | 'reconnecting' | 'disconnected';
   onPlay: (time: number) => void;
   onPause: (time: number) => void;
   onSeek: (time: number) => void;
@@ -41,6 +42,7 @@ export default function SyncedPlayer({
   isPlaying,
   currentTime,
   reactions = [],
+  connectionStatus = 'connected',
   onPlay,
   onPause,
   onSeek,
@@ -58,8 +60,10 @@ export default function SyncedPlayer({
   const [playbackRate, setPlaybackRate] = useState(1);
   const [showControls, setShowControls] = useState(true);
   const [syncStatus, setSyncStatus] = useState<'synced' | 'syncing'>('synced');
+  const [isUserDraggingSeek, setIsUserDraggingSeek] = useState(false);
 
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const lastSyncedTimeRef = useRef<number>(0);
 
   // Restore saved seek position from localStorage if room load starts
   useEffect(() => {
@@ -70,7 +74,6 @@ export default function SyncedPlayer({
     if (savedTime && videoRef.current) {
       const parsedTime = parseFloat(savedTime);
       if (!isNaN(parsedTime) && parsedTime > 0) {
-        // If server initial currentTime is 0, initialize with saved seek position
         if (currentTime === 0 && videoRef.current.currentTime === 0) {
           videoRef.current.currentTime = parsedTime;
           setProgress(parsedTime);
@@ -98,12 +101,12 @@ export default function SyncedPlayer({
     };
   }, [roomId]);
 
-  // Sync Video Element state with prop updates
+  // Sync Video Element state with room prop updates
   useEffect(() => {
     const video = videoRef.current;
-    if (!video) return;
+    if (!video || isUserDraggingSeek) return;
 
-    // Play/Pause sync
+    // 1. Play/Pause state sync
     if (isPlaying && video.paused) {
       video.play().catch(() => {});
       setLocalIsPlaying(true);
@@ -112,16 +115,20 @@ export default function SyncedPlayer({
       setLocalIsPlaying(false);
     }
 
-    // Drift correction check (if drift > 1.5s)
+    // 2. Instant Seek Force Snap & 0.5s Drift auto-correction
     if (typeof currentTime === 'number' && Number.isFinite(currentTime)) {
       const drift = Math.abs(video.currentTime - currentTime);
-      if (drift > 1.5) {
+      const isExplicitSeek = Math.abs(lastSyncedTimeRef.current - currentTime) > 2;
+
+      if (isExplicitSeek || drift > 0.5) {
         setSyncStatus('syncing');
         video.currentTime = currentTime;
-        setTimeout(() => setSyncStatus('synced'), 800);
+        setProgress(currentTime);
+        lastSyncedTimeRef.current = currentTime;
+        setTimeout(() => setSyncStatus('synced'), 400);
       }
     }
-  }, [isPlaying, currentTime]);
+  }, [isPlaying, currentTime, isUserDraggingSeek]);
 
   const handleTogglePlay = () => {
     const video = videoRef.current;
@@ -134,8 +141,18 @@ export default function SyncedPlayer({
     }
   };
 
+  const handleSeekMouseDown = () => {
+    setIsUserDraggingSeek(true);
+  };
+
   const handleSeekChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const targetTime = parseFloat(e.target.value);
+    setProgress(targetTime);
+  };
+
+  const handleSeekMouseUp = (e: React.MouseEvent<HTMLInputElement> | React.TouchEvent<HTMLInputElement>) => {
+    setIsUserDraggingSeek(false);
+    const targetTime = parseFloat((e.target as HTMLInputElement).value);
     const video = videoRef.current;
     if (video) {
       video.currentTime = targetTime;
@@ -150,6 +167,7 @@ export default function SyncedPlayer({
     if (video) {
       const newTime = Math.max(0, Math.min(duration, video.currentTime + seconds));
       video.currentTime = newTime;
+      setProgress(newTime);
       localStorage.setItem(`watch_seek_${roomId}`, newTime.toString());
       onSeek(newTime);
     }
@@ -226,10 +244,9 @@ export default function SyncedPlayer({
         className="w-full h-full object-contain cursor-pointer"
         onClick={handleTogglePlay}
         onTimeUpdate={() => {
-          if (videoRef.current) {
+          if (videoRef.current && !isUserDraggingSeek) {
             const curTime = videoRef.current.currentTime;
             setProgress(curTime);
-            // Save seek periodically every 5 seconds
             if (Math.floor(curTime) % 5 === 0) {
               localStorage.setItem(`watch_seek_${roomId}`, curTime.toString());
             }
@@ -238,7 +255,6 @@ export default function SyncedPlayer({
         onLoadedMetadata={() => {
           if (videoRef.current) {
             setDuration(videoRef.current.duration);
-            // Check if saved seek exists
             const savedTime = localStorage.getItem(`watch_seek_${roomId}`);
             if (savedTime) {
               const pTime = parseFloat(savedTime);
@@ -287,21 +303,28 @@ export default function SyncedPlayer({
         </div>
 
         <div className="flex items-center space-x-2">
-          {/* Sync Status Badge */}
-          <div
-            className={`flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-semibold border ${
-              syncStatus === 'synced'
-                ? 'bg-emerald-950/60 border-emerald-500/40 text-emerald-300'
-                : 'bg-amber-950/60 border-amber-500/40 text-amber-300'
-            }`}
-          >
-            <span
-              className={`w-2 h-2 rounded-full ${
-                syncStatus === 'synced' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400 animate-ping'
+          {/* Connection & Sync Status Badge */}
+          {connectionStatus === 'reconnecting' ? (
+            <div className="flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-rose-950/80 border border-rose-500/40 text-rose-300">
+              <span className="w-2 h-2 rounded-full bg-rose-400 animate-ping" />
+              <span>RECONNECTING...</span>
+            </div>
+          ) : (
+            <div
+              className={`flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-semibold border ${
+                syncStatus === 'synced'
+                  ? 'bg-emerald-950/60 border-emerald-500/40 text-emerald-300'
+                  : 'bg-amber-950/60 border-amber-500/40 text-amber-300'
               }`}
-            />
-            <span>{syncStatus === 'synced' ? 'SYNCED' : 'ALIGNING...'}</span>
-          </div>
+            >
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  syncStatus === 'synced' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400 animate-ping'
+                }`}
+              />
+              <span>{syncStatus === 'synced' ? 'SYNCED' : 'ALIGNING...'}</span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -321,7 +344,11 @@ export default function SyncedPlayer({
               max={duration || 100}
               step={0.1}
               value={progress}
+              onMouseDown={handleSeekMouseDown}
+              onTouchStart={handleSeekMouseDown}
               onChange={handleSeekChange}
+              onMouseUp={handleSeekMouseUp}
+              onTouchEnd={handleSeekMouseUp}
               className="w-full h-1.5 bg-slate-700/80 rounded-lg appearance-none cursor-pointer accent-purple-500 hover:h-2.5 transition-all"
             />
           </div>
@@ -330,7 +357,7 @@ export default function SyncedPlayer({
 
         {/* Buttons Row */}
         <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-3">
+          <div className="flex items-center space-x-2 sm:space-x-3">
             {/* Play/Pause */}
             <button
               onClick={handleTogglePlay}
@@ -343,7 +370,7 @@ export default function SyncedPlayer({
             {/* Skip -10s */}
             <button
               onClick={() => handleSkip(-10)}
-              className="p-2 text-slate-300 hover:text-white transition-colors"
+              className="p-1.5 sm:p-2 text-slate-300 hover:text-white transition-colors"
               title="Skip -10s"
             >
               <RotateCcw className="w-4 h-4" />
@@ -352,7 +379,7 @@ export default function SyncedPlayer({
             {/* Skip +10s */}
             <button
               onClick={() => handleSkip(10)}
-              className="p-2 text-slate-300 hover:text-white transition-colors"
+              className="p-1.5 sm:p-2 text-slate-300 hover:text-white transition-colors"
               title="Skip +10s"
             >
               <RotateCw className="w-4 h-4" />
