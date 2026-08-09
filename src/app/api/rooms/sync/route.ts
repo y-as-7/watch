@@ -1,4 +1,10 @@
 import { NextResponse } from 'next/server';
+import {
+  getRoomStateDB,
+  saveRoomStateDB,
+  saveChatMessageDB,
+  getChatHistoryDB,
+} from '@/lib/mongodb';
 
 interface UserSession {
   id: string;
@@ -38,10 +44,10 @@ const DEFAULT_VIDEO =
   process.env.NEXT_PUBLIC_DEFAULT_VIDEO ||
   'https://pub-dde59808cc1047d79e1e16a58f627c57.r2.dev/movies/[Qfilm.tv].Siccin.3.2016.WEB-DL.720p.mp4';
 
-// In-memory room sync storage for serverless edge/node runtime
+// In-memory room sync storage for local fallback
 const syncRooms = new Map<string, VercelRoomState>();
 
-function getOrCreateSyncRoom(code: string): VercelRoomState {
+function getOrCreateSyncRoomLocal(code: string): VercelRoomState {
   if (!syncRooms.has(code)) {
     syncRooms.set(code, {
       code,
@@ -67,40 +73,65 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Room code required' }, { status: 400 });
   }
 
-  const room = getOrCreateSyncRoom(code);
-
-  // Update user lastSeen timestamp if userId present
-  if (userId && room.users.has(userId)) {
-    const u = room.users.get(userId)!;
-    u.lastSeen = Date.now();
-  }
-
-  // Cleanup inactive users (> 15s)
   const now = Date.now();
-  for (const [uid, user] of room.users.entries()) {
-    if (now - user.lastSeen > 15000) {
-      room.users.delete(uid);
-    }
+
+  // Try MongoDB Atlas first
+  const dbState = await getRoomStateDB(code);
+  const dbChats = await getChatHistoryDB(code);
+
+  let videoUrl = DEFAULT_VIDEO;
+  let videoTitle = 'Siccin 3 (2016) WEB-DL 720p';
+  let currentTime = 0;
+  let isPlaying = false;
+  let lastUpdated = now;
+  let usersList: UserSession[] = [];
+  let chatsList: ChatMsg[] = [];
+  let reactionsList: Reaction[] = [];
+
+  if (dbState) {
+    videoUrl = dbState.videoUrl;
+    videoTitle = dbState.videoTitle;
+    currentTime = dbState.currentTime;
+    isPlaying = dbState.isPlaying;
+    lastUpdated = dbState.lastUpdated;
+    usersList = (dbState.users || []).map((u) => ({
+      id: u.id,
+      name: u.name,
+      avatar: u.avatar,
+      lastSeen: now,
+    }));
+    chatsList = (dbChats as unknown as ChatMsg[]) || [];
+  } else {
+    // Fallback to local memory map
+    const localRoom = getOrCreateSyncRoomLocal(code);
+    videoUrl = localRoom.videoUrl;
+    videoTitle = localRoom.videoTitle;
+    currentTime = localRoom.currentTime;
+    isPlaying = localRoom.isPlaying;
+    lastUpdated = localRoom.lastUpdated;
+    usersList = Array.from(localRoom.users.values());
+    chatsList = localRoom.chats.slice(-50);
+    reactionsList = localRoom.reactions.filter((r) => now - r.timestamp < 4000);
   }
 
   // Calculate current playback position
-  let currentComputedTime = room.currentTime;
-  if (room.isPlaying) {
-    const elapsed = (now - room.lastUpdated) / 1000;
+  let currentComputedTime = currentTime;
+  if (isPlaying) {
+    const elapsed = (now - lastUpdated) / 1000;
     currentComputedTime += elapsed;
   }
 
   return NextResponse.json({
     success: true,
-    code: room.code,
-    videoUrl: room.videoUrl,
-    videoTitle: room.videoTitle,
+    code,
+    videoUrl,
+    videoTitle,
     currentTime: currentComputedTime,
-    isPlaying: room.isPlaying,
-    lastUpdated: room.lastUpdated,
-    users: Array.from(room.users.values()),
-    chats: room.chats.slice(-50), // Last 50 messages
-    reactions: room.reactions.filter((r) => now - r.timestamp < 4000), // Active 4s floating reactions
+    isPlaying,
+    lastUpdated,
+    users: usersList,
+    chats: chatsList,
+    reactions: reactionsList,
   });
 }
 
@@ -113,11 +144,42 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Room code required' }, { status: 400 });
     }
 
-    const room = getOrCreateSyncRoom(code);
     const now = Date.now();
+    const localRoom = getOrCreateSyncRoomLocal(code);
 
+    // Get current state from MongoDB or local
+    let dbState = await getRoomStateDB(code);
+    if (!dbState) {
+      dbState = {
+        roomId: code,
+        videoUrl: localRoom.videoUrl,
+        videoTitle: localRoom.videoTitle,
+        currentTime: localRoom.currentTime,
+        isPlaying: localRoom.isPlaying,
+        lastUpdated: localRoom.lastUpdated,
+        hostId: user?.id || 'host',
+        users: [],
+      };
+    }
+
+    // Update users array
+    let users = dbState.users || [];
     if (user && user.id) {
-      room.users.set(user.id, {
+      const existingIdx = users.findIndex((u) => u.id === user.id);
+      const userObj = {
+        id: user.id,
+        name: user.name || `guest_${user.id.slice(-4)}`,
+        avatar: user.avatar || '🍿',
+        role: user.isAdmin ? 'admin' : 'viewer',
+        socketId: user.id,
+      };
+      if (existingIdx >= 0) {
+        users[existingIdx] = userObj;
+      } else {
+        users.push(userObj);
+      }
+
+      localRoom.users.set(user.id, {
         id: user.id,
         name: user.name || `guest_${user.id.slice(-4)}`,
         avatar: user.avatar || '🍿',
@@ -127,34 +189,70 @@ export async function POST(request: Request) {
     }
 
     if (action === 'play') {
-      room.isPlaying = true;
-      if (typeof currentTime === 'number') room.currentTime = currentTime;
-      room.lastUpdated = now;
+      dbState.isPlaying = true;
+      if (typeof currentTime === 'number') dbState.currentTime = currentTime;
+      dbState.lastUpdated = now;
+
+      localRoom.isPlaying = true;
+      if (typeof currentTime === 'number') localRoom.currentTime = currentTime;
+      localRoom.lastUpdated = now;
     } else if (action === 'pause') {
-      room.isPlaying = false;
-      if (typeof currentTime === 'number') room.currentTime = currentTime;
-      room.lastUpdated = now;
+      dbState.isPlaying = false;
+      if (typeof currentTime === 'number') dbState.currentTime = currentTime;
+      dbState.lastUpdated = now;
+
+      localRoom.isPlaying = false;
+      if (typeof currentTime === 'number') localRoom.currentTime = currentTime;
+      localRoom.lastUpdated = now;
     } else if (action === 'seek') {
-      if (typeof currentTime === 'number') room.currentTime = currentTime;
-      room.lastUpdated = now;
+      if (typeof currentTime === 'number') dbState.currentTime = currentTime;
+      dbState.lastUpdated = now;
+
+      if (typeof currentTime === 'number') localRoom.currentTime = currentTime;
+      localRoom.lastUpdated = now;
     } else if (action === 'change-video') {
-      if (videoUrl) room.videoUrl = videoUrl;
-      if (videoTitle) room.videoTitle = videoTitle;
-      room.currentTime = 0;
-      room.isPlaying = false;
-      room.lastUpdated = now;
+      if (videoUrl) {
+        dbState.videoUrl = videoUrl;
+        localRoom.videoUrl = videoUrl;
+      }
+      if (videoTitle) {
+        dbState.videoTitle = videoTitle;
+        localRoom.videoTitle = videoTitle;
+      }
+      dbState.currentTime = 0;
+      dbState.isPlaying = false;
+      dbState.lastUpdated = now;
+
+      localRoom.currentTime = 0;
+      localRoom.isPlaying = false;
+      localRoom.lastUpdated = now;
     } else if (action === 'chat') {
       if (message && user) {
-        room.chats.push({
+        const chatObj = {
           id: 'msg-' + now + '-' + Math.random().toString(36).substring(2, 6),
-          user,
+          user: {
+            id: user.id || 'guest',
+            name: user.name || 'Guest',
+            avatar: user.avatar || '🍿',
+            role: user.isAdmin ? 'admin' : 'viewer',
+          },
           text: message,
           timestamp: new Date().toISOString(),
+        };
+        await saveChatMessageDB(code, chatObj);
+        localRoom.chats.push({
+          id: chatObj.id,
+          user: {
+            ...chatObj.user,
+            lastSeen: now,
+          },
+          text: chatObj.text,
+          timestamp: chatObj.timestamp,
         });
       }
     } else if (action === 'reaction') {
       if (emoji && user) {
-        room.reactions.push({
+        localRoom.reactions.push({
           id: 'react-' + now + '-' + Math.random().toString(36).substring(2, 6),
           user,
           emoji,
@@ -163,13 +261,17 @@ export async function POST(request: Request) {
       }
     }
 
+    dbState.users = users;
+    await saveRoomStateDB(code, dbState);
+
     return NextResponse.json({
       success: true,
-      code: room.code,
-      currentTime: room.currentTime,
-      isPlaying: room.isPlaying,
+      code: dbState.roomId,
+      currentTime: dbState.currentTime,
+      isPlaying: dbState.isPlaying,
     });
-  } catch {
+  } catch (err) {
+    console.error('Failed to sync room state:', err);
     return NextResponse.json({ error: 'Failed to process sync event' }, { status: 500 });
   }
 }
