@@ -222,7 +222,7 @@ export async function POST(request: Request) {
       localRoom.lastUpdated = now;
 
       pusherEvent = 'sync-seek';
-      pusherPayload = { currentTime: dbState.currentTime };
+      pusherPayload = { currentTime: dbState.currentTime, seekSeq: now };
     } else if (action === 'progress') {
       if (typeof currentTime === 'number') {
         dbState.currentTime = currentTime;
@@ -296,6 +296,14 @@ export async function POST(request: Request) {
         pusherEvent = 'reaction';
         pusherPayload = reactionObj;
       }
+    } else if (action === 'leave') {
+      if (user && user.id) {
+        users = users.filter((u) => u.id !== user.id);
+        localRoom.users.delete(user.id);
+
+        pusherEvent = 'user-left';
+        pusherPayload = { userId: user.id, users };
+      }
     }
 
     dbState.users = users;
@@ -310,6 +318,7 @@ export async function POST(request: Request) {
       code: dbState.roomId,
       currentTime: dbState.currentTime,
       isPlaying: dbState.isPlaying,
+      seekSeq: now,
     });
   } catch (err) {
     console.error('Failed to sync room state:', err);

@@ -7,9 +7,10 @@ import Navbar from '@/components/Navbar';
 import SyncedPlayer, { ReactionItem } from '@/components/SyncedPlayer';
 import UserListBar from '@/components/UserListBar';
 import RoomChat, { ChatMessage } from '@/components/RoomChat';
+import VoiceChatBar from '@/components/VoiceChatBar';
 import ShareRoomModal from '@/components/ShareRoomModal';
-import { getOrCreateGuestSession, GuestUser } from '@/lib/session';
-import { subscribeToRoom, unsubscribeFromRoom, getPusherClient } from '@/lib/pusherClient';
+import { getOrCreateGuestSession, saveGuestSession, GuestUser } from '@/lib/session';
+import { subscribeToRoom, unsubscribeFromRoom, disconnectPusher, getPusherClient } from '@/lib/pusherClient';
 
 export default function RoomPage({ params }: { params: Promise<{ code: string }> }) {
   const { code } = use(params);
@@ -22,14 +23,13 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
   const [videoTitle, setVideoTitle] = useState('');
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
+  const [seekSeq, setSeekSeq] = useState(0);
   const [connectedUsers, setConnectedUsers] = useState<GuestUser[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [floatingReactions, setFloatingReactions] = useState<ReactionItem[]>([]);
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'reconnecting' | 'disconnected'>('connected');
   const [activeMobileTab, setActiveMobileTab] = useState<'chat' | 'watchers'>('chat');
-
-  const syncIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     const session = getOrCreateGuestSession();
@@ -48,7 +48,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
       .catch(() => {});
   }, [code]);
 
-  // Real-time Pusher Channels & HTTP polling fallback
+  // Real-time Pusher Channels (No long polling)
   const httpSyncWorkingRef = useRef(false);
   const isInitialSyncRef = useRef(true);
   const guestRef = useRef(guest);
@@ -56,8 +56,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
 
   const guestId = guest?.id;
 
-  // Add a floating reaction and auto-remove it once its float-up animation ends,
-  // regardless of whether it arrived via Pusher or a poll (dedup by id either way).
+  // Add a floating reaction and auto-remove it once its float-up animation ends
   const addReaction = (r: ReactionItem) => {
     setFloatingReactions((prev) => (prev.some((x) => x.id === r.id) ? prev : [...prev, r]));
     setTimeout(() => {
@@ -71,55 +70,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     const channel = subscribeToRoom(code);
     const pusherClient = getPusherClient();
 
-    const handlePusherStateChange = (states: { current: string }) => {
-      if (states.current === 'connected') {
-        setConnectionStatus('connected');
-      } else if (!httpSyncWorkingRef.current) {
-        setConnectionStatus('reconnecting');
-      }
-    };
-
-    // Pusher event handlers (near-instant sync while connected)
-    const handleSyncPlay = ({ currentTime: time }: { currentTime: number }) => {
-      setIsPlaying(true);
-      if (typeof time === 'number') setCurrentTime(time);
-    };
-
-    const handleSyncPause = ({ currentTime: time }: { currentTime: number }) => {
-      setIsPlaying(false);
-      if (typeof time === 'number') setCurrentTime(time);
-    };
-
-    const handleSyncSeek = ({ currentTime: time }: { currentTime: number }) => {
-      if (typeof time === 'number') setCurrentTime(time);
-    };
-
-    const handleSyncVideoChange = ({ videoUrl: url, videoTitle: title }: { videoUrl: string; videoTitle: string }) => {
-      if (url) setVideoUrl(url);
-      if (title) setVideoTitle(title);
-      setCurrentTime(0);
-      setIsPlaying(false);
-    };
-
-    const handleChatMessage = (msg: ChatMessage) => {
-      setChatMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
-    };
-
-    const handleReaction = (r: ReactionItem) => addReaction(r);
-
-    pusherClient?.connection.bind('state_change', handlePusherStateChange);
-
-    if (channel) {
-      channel.bind('sync-play', handleSyncPlay);
-      channel.bind('sync-pause', handleSyncPause);
-      channel.bind('sync-seek', handleSyncSeek);
-      channel.bind('sync-video-change', handleSyncVideoChange);
-      channel.bind('chat-message', handleChatMessage);
-      channel.bind('reaction', handleReaction);
-    }
-
-    // Server state synchronization fetcher: the resilient fallback that always
-    // runs, so sync keeps working even when Pusher can't connect.
+    // Fetch initial room playback state & chat history once on mount/reconnect
     const performSyncFetch = async () => {
       try {
         const res = await fetch(`/api/rooms/sync?code=${code}&userId=${guestId}`);
@@ -133,15 +84,10 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
           if (data.videoTitle && data.videoTitle !== videoTitle) setVideoTitle(data.videoTitle);
 
           if (isInitialSyncRef.current) {
-            // New user joining: instantly snap to exact playback position & play/pause state from MongoDB Atlas
             if (typeof data.currentTime === 'number') setCurrentTime(data.currentTime);
             setIsPlaying(Boolean(data.isPlaying));
+            if (typeof data.seekSeq === 'number') setSeekSeq(data.seekSeq);
             isInitialSyncRef.current = false;
-          } else {
-            // Periodic sync update: always pass the authoritative time through so
-            // SyncedPlayer can smooth out small drift instead of only reacting to jumps >3s.
-            setIsPlaying((prev) => (prev !== data.isPlaying ? data.isPlaying : prev));
-            if (typeof data.currentTime === 'number') setCurrentTime(data.currentTime);
           }
 
           if (data.users) {
@@ -182,24 +128,115 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
       }
     };
 
-    // Immediate initial sync
-    performSyncFetch();
+    const handlePusherStateChange = (states: { current: string }) => {
+      if (states.current === 'connected') {
+        setConnectionStatus('connected');
+        performSyncFetch();
+      } else if (!httpSyncWorkingRef.current) {
+        setConnectionStatus('reconnecting');
+      }
+    };
 
-    // 1-Second long-polling heartbeat fallback for MongoDB Atlas room sync
-    syncIntervalRef.current = setInterval(performSyncFetch, 1000);
+    // Pusher real-time event handlers
+    const handleSyncPlay = ({ currentTime: time }: { currentTime: number }) => {
+      setIsPlaying(true);
+      if (typeof time === 'number') setCurrentTime(time);
+    };
+
+    const handleSyncPause = ({ currentTime: time }: { currentTime: number }) => {
+      setIsPlaying(false);
+      if (typeof time === 'number') setCurrentTime(time);
+    };
+
+    const handleSyncSeek = ({ currentTime: time, seekSeq: seq }: { currentTime: number; seekSeq?: number }) => {
+      if (typeof time === 'number') setCurrentTime(time);
+      setSeekSeq(seq || Date.now());
+    };
+
+    const handleSyncVideoChange = ({ videoUrl: url, videoTitle: title }: { videoUrl: string; videoTitle: string }) => {
+      if (url) setVideoUrl(url);
+      if (title) setVideoTitle(title);
+      setCurrentTime(0);
+      setIsPlaying(false);
+    };
+
+    const handleChatMessage = (msg: ChatMessage) => {
+      setChatMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+    };
+
+    const handleReaction = (r: ReactionItem) => addReaction(r);
+
+    const handleUserLeft = ({ userId, users }: { userId: string; users?: GuestUser[] }) => {
+      if (users && Array.isArray(users)) {
+        setConnectedUsers(users);
+      } else if (userId) {
+        setConnectedUsers((prev) => prev.filter((u) => u.id !== userId));
+      }
+    };
+
+    pusherClient?.connection.bind('state_change', handlePusherStateChange);
+
+    if (channel) {
+      channel.bind('sync-play', handleSyncPlay);
+      channel.bind('sync-pause', handleSyncPause);
+      channel.bind('sync-seek', handleSyncSeek);
+      channel.bind('sync-video-change', handleSyncVideoChange);
+      channel.bind('chat-message', handleChatMessage);
+      channel.bind('reaction', handleReaction);
+      channel.bind('user-left', handleUserLeft);
+    }
+
+    // Initial sync fetch on room join & window focus
+    performSyncFetch();
+    window.addEventListener('focus', performSyncFetch);
 
     return () => {
-      if (syncIntervalRef.current) clearInterval(syncIntervalRef.current);
+      window.removeEventListener('focus', performSyncFetch);
       pusherClient?.connection.unbind('state_change', handlePusherStateChange);
       if (channel) {
         channel.unbind_all();
       }
       unsubscribeFromRoom(code);
+      disconnectPusher();
     };
   }, [code, guestId]);
 
-  // Action handlers with immediate MongoDB Atlas persistence; the sync route
-  // triggers the Pusher broadcast server-side once the write succeeds.
+  // Automatically disconnect user from room state and Pusher WebSockets when tab or browser is closed
+  useEffect(() => {
+    const handleTabCloseDisconnect = () => {
+      if (!guest || !code) return;
+      const payload = JSON.stringify({
+        code,
+        action: 'leave',
+        user: guest,
+      });
+
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon('/api/rooms/sync', payload);
+      } else {
+        fetch('/api/rooms/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: payload,
+          keepalive: true,
+        }).catch(() => {});
+      }
+
+      unsubscribeFromRoom(code);
+      disconnectPusher();
+    };
+
+    window.addEventListener('beforeunload', handleTabCloseDisconnect);
+    window.addEventListener('pagehide', handleTabCloseDisconnect);
+
+    return () => {
+      handleTabCloseDisconnect();
+      window.removeEventListener('beforeunload', handleTabCloseDisconnect);
+      window.removeEventListener('pagehide', handleTabCloseDisconnect);
+    };
+  }, [code, guest]);
+
+  // Action handlers with immediate Pusher broadcasting
   const handleSendSyncAction = async (action: string, payload: Record<string, unknown> = {}) => {
     if (!guest) return;
     try {
@@ -231,8 +268,10 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
   };
 
   const handleSeek = (time: number) => {
+    const nextSeq = Date.now();
     setCurrentTime(time);
-    handleSendSyncAction('seek', { currentTime: time, isPlaying });
+    setSeekSeq(nextSeq);
+    handleSendSyncAction('seek', { currentTime: time, isPlaying, seekSeq: nextSeq });
   };
 
   const handleSendMessage = (text: string) => {
@@ -283,6 +322,9 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
           </button>
         </div>
 
+        {/* Agora Voice Call Toolbar */}
+        <VoiceChatBar roomCode={code} userId={guest?.id} userName={guest?.name} />
+
         {/* Room Main Content: Player + Sidebar */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6">
           {/* Main Synced Video Player */}
@@ -293,6 +335,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
               roomId={code}
               isPlaying={isPlaying}
               currentTime={currentTime}
+              seekSeq={seekSeq}
               reactions={floatingReactions}
               connectionStatus={connectionStatus}
               onPlay={handlePlay}

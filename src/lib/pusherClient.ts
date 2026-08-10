@@ -22,3 +22,10 @@ export function subscribeToRoom(code: string): Channel | null {
 export function unsubscribeFromRoom(code: string) {
   pusher?.unsubscribe(`room-${code}`);
 }
+
+export function disconnectPusher() {
+  if (pusher) {
+    pusher.disconnect();
+    pusher = null;
+  }
+}

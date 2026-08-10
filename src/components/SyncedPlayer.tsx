@@ -38,6 +38,7 @@ interface SyncedPlayerProps {
   roomId: string;
   isPlaying: boolean;
   currentTime: number;
+  seekSeq?: number;
   reactions?: ReactionItem[];
   connectionStatus?: 'connected' | 'reconnecting' | 'disconnected';
   onPlay: (time: number) => void;
@@ -51,6 +52,7 @@ function SyncedPlayer({
   roomId,
   isPlaying,
   currentTime,
+  seekSeq = 0,
   reactions = [],
   connectionStatus = 'connected',
   onPlay,
@@ -74,6 +76,7 @@ function SyncedPlayer({
 
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const lastSyncedTimeRef = useRef<number>(0);
+  const lastHandledSeekSeqRef = useRef<number>(0);
   const lastProgressUpdateRef = useRef<number>(0);
   const isPlayerVisibleRef = useRef(false);
   const autoEnteredFullscreenRef = useRef(false);
@@ -211,30 +214,28 @@ function SyncedPlayer({
       setLocalIsPlaying(false);
     }
 
-    // 2. Drift auto-correction: hard seek only for large drift/explicit seeks
-    // (rebuffers, so reserved for >3s); small drift is nudged back gently via
-    // playbackRate so it doesn't cause a visible freeze.
-    if (typeof currentTime === 'number' && Number.isFinite(currentTime)) {
-      const drift = video.currentTime - currentTime;
-      const absDrift = Math.abs(drift);
-      const isExplicitSeek = Math.abs(lastSyncedTimeRef.current - currentTime) > 3;
+    if (typeof currentTime !== 'number' || !Number.isFinite(currentTime)) return;
 
-      if (isExplicitSeek || absDrift > 3) {
-        setSyncStatus('syncing');
-        video.currentTime = currentTime;
-        video.playbackRate = playbackRate;
-        setProgress(currentTime);
-        setTimeout(() => setSyncStatus('synced'), 400);
-      } else if (absDrift > 0.75) {
-        setSyncStatus('syncing');
-        video.playbackRate = drift > 0 ? Math.max(0.8, playbackRate - 0.15) : playbackRate + 0.15;
-      } else {
-        video.playbackRate = playbackRate;
-        setSyncStatus('synced');
+    const isNewExplicitSeek = seekSeq > 0 && seekSeq !== lastHandledSeekSeqRef.current;
+    const drift = Math.abs(video.currentTime - currentTime);
+
+    // 2. Explicit seek event (user dragged slider, skip button, or incoming Pusher sync-seek)
+    // or hard drift > 3s (e.g. client reconnected or paused out of sync)
+    if (isNewExplicitSeek || drift > 3.0 || !isPlaying) {
+      if (isNewExplicitSeek) {
+        lastHandledSeekSeqRef.current = seekSeq;
       }
-      lastSyncedTimeRef.current = currentTime;
+      setSyncStatus('syncing');
+      video.currentTime = currentTime;
+      video.playbackRate = playbackRate;
+      setProgress(currentTime);
+      setTimeout(() => setSyncStatus('synced'), 300);
+    } else {
+      video.playbackRate = playbackRate;
+      setSyncStatus('synced');
     }
-  }, [isPlaying, currentTime, isUserDraggingSeek, playbackRate]);
+    lastSyncedTimeRef.current = currentTime;
+  }, [isPlaying, currentTime, seekSeq, isUserDraggingSeek, playbackRate]);
 
   const handleTogglePlay = () => {
     const video = videoRef.current;
