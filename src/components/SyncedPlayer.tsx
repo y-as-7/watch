@@ -75,6 +75,8 @@ function SyncedPlayer({
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const lastSyncedTimeRef = useRef<number>(0);
   const lastProgressUpdateRef = useRef<number>(0);
+  const isPlayerVisibleRef = useRef(false);
+  const autoEnteredFullscreenRef = useRef(false);
 
   // Restore saved seek position from localStorage if room load starts
   useEffect(() => {
@@ -118,7 +120,10 @@ function SyncedPlayer({
     if (!video) return;
 
     const handleBeginFS = () => setIsFullscreen(true);
-    const handleEndFS = () => setIsFullscreen(false);
+    const handleEndFS = () => {
+      setIsFullscreen(false);
+      autoEnteredFullscreenRef.current = false;
+    };
 
     video.addEventListener('webkitbeginfullscreen', handleBeginFS);
     video.addEventListener('webkitendfullscreen', handleEndFS);
@@ -127,6 +132,69 @@ function SyncedPlayer({
       video.removeEventListener('webkitbeginfullscreen', handleBeginFS);
       video.removeEventListener('webkitendfullscreen', handleEndFS);
     };
+  }, []);
+
+  // Track whether the player is actually on-screen, so a device rotation
+  // doesn't yank the user into fullscreen while they've scrolled away (e.g. into chat).
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        isPlayerVisibleRef.current = entry.isIntersecting && entry.intersectionRatio >= 0.5;
+      },
+      { threshold: 0.5 }
+    );
+    observer.observe(container);
+
+    return () => observer.disconnect();
+  }, []);
+
+  // iOS Safari doesn't auto-rotate the video into fullscreen the way native
+  // apps do, so mirror that behavior: entering landscape while the player is
+  // visible auto-triggers native fullscreen, and rotating back out of it
+  // (only if we were the ones who triggered it) exits fullscreen again.
+  useEffect(() => {
+    const isIOS =
+      /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    if (!isIOS) return;
+
+    const orientationQuery = window.matchMedia('(orientation: landscape)');
+
+    const handleOrientationChange = (e: MediaQueryListEvent) => {
+      const video = videoRef.current;
+      if (!video) return;
+      const nativeFullscreen = Boolean((document as any).webkitCurrentFullScreenElement);
+
+      if (e.matches) {
+        if (
+          !nativeFullscreen &&
+          isPlayerVisibleRef.current &&
+          typeof (video as any).webkitEnterFullscreen === 'function'
+        ) {
+          try {
+            (video as any).webkitEnterFullscreen();
+            autoEnteredFullscreenRef.current = true;
+          } catch {
+            // quiet catch
+          }
+        }
+      } else if (nativeFullscreen && autoEnteredFullscreenRef.current) {
+        if (typeof (video as any).webkitExitFullscreen === 'function') {
+          try {
+            (video as any).webkitExitFullscreen();
+          } catch {
+            // quiet catch
+          }
+        }
+        autoEnteredFullscreenRef.current = false;
+      }
+    };
+
+    orientationQuery.addEventListener('change', handleOrientationChange);
+    return () => orientationQuery.removeEventListener('change', handleOrientationChange);
   }, []);
 
   // Sync Video Element state with room prop updates
